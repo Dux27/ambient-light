@@ -1,0 +1,21 @@
+[project]
+name = "ambient-light"
+version = "0.1.0"
+description = "Real-time HDMI capture and mean RGB color extraction using OpenCV, NumPy, and Matplotlib for low-latency ambient lighting."
+readme = "README.md"
+authors = [
+    { name = "Dux27", email = "filip.jaworski279@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
+    "opencv-python>=5.0.0.93",
+]
+
+[project.scripts]
+ambient-light = "ambient_light:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
