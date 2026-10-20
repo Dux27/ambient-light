@@ -40,44 +40,73 @@ def main():
             f"-> {width}x{height}"
         )
 
+    # Physical LED layout: 144 top + 72 left + 72 right.
+    # Extra row allows side strips to start below the top strip.
+    led_preview_width = config.N_LED_TOP
+    led_preview_height = config.N_LED_SIDE + 1
+
     # Initialize visualization only when enabled.
     fig = None
-    video_image = None
-    color_image = None
 
     if config.ENABLE_VISUALIZATION:
         plt.ion()  # Interactive mode on
 
-        # Creating Figure and two child Axes objects.
-        fig, (ax_video, ax_color) = plt.subplots(
-            1, 2, figsize=(12, 5)
+        # Creating Figure and three child Axes objects.
+        fig, (ax_video, ax_color, ax_led) = plt.subplots(1, 3)
+
+        fig.canvas.manager.full_screen_toggle()
+
+        fig.subplots_adjust(
+            left=0.01,
+            right=0.99,
+            wspace=0.05,
         )
 
         fig.canvas.manager.set_window_title("HDMI Capture")
         fig.suptitle("Ambient Light Visualization")
 
-        # Create an image Artist for the captured video.
+        # === Video Axes ===
         video_image = ax_video.imshow(
-            np.zeros((height, width, 3), dtype=np.uint8)
+            np.zeros((height, width, 3), dtype=np.uint8),
+            interpolation="nearest",
+            aspect="equal",
         )
 
-        ax_video.set_title(f"Raw Image Resolution: {width}x{height}")
+        ax_video.set_title(f"Raw img resolution: {width}x{height}")
         ax_video.axis("off")
 
-        # Create an image Artist for the extracted color grid.
+        # === Color Axes ===
         color_image = ax_color.imshow(
             np.zeros(
                 (config.GRID_HEIGHT, config.GRID_WIDTH, 3),
                 dtype=np.uint8,
             ),
             interpolation="nearest",
+            aspect="equal",
         )
 
         ax_color.set_title(
-            f"Downsampled Image Resolution: "
+            f"Downsampled img resolution: "
             f"{config.GRID_WIDTH}x{config.GRID_HEIGHT}"
         )
         ax_color.axis("off")
+
+        # === LED Axes ===
+        led_image = ax_led.imshow(
+            np.zeros(
+                (led_preview_height, led_preview_width, 3),
+                dtype=np.uint8,
+            ),
+            interpolation="nearest",
+            aspect="equal",
+        )
+
+        ax_led.set_title(
+            f"LED layout: {config.N_LED_TOP} top + "
+            f"{config.N_LED_SIDE} left + "
+            f"{config.N_LED_SIDE} right"
+        )
+        ax_led.axis("off")
 
     fail_counter = 0
 
@@ -91,7 +120,8 @@ def main():
 
     try:
         while fig is None or plt.fignum_exists(fig.number):
-            # Capture frame.
+
+            # === Capture ===
             t0 = time.perf_counter()
             ret, frame = cap.read()
             t1 = time.perf_counter()
@@ -104,33 +134,87 @@ def main():
                 )
                 continue
 
-            color_preview = cv2.resize(
+            # === Color Extraction ===
+            color_grid = cv2.resize(
                 frame,
                 (config.GRID_WIDTH, config.GRID_HEIGHT),
                 interpolation=cv2.INTER_AREA,
             )
 
-            color_preview = cv2.cvtColor(
-                color_preview, cv2.COLOR_BGR2RGB
+            color_grid = cv2.cvtColor(
+                color_grid,
+                cv2.COLOR_BGR2RGB,
             )
 
-            # Full-resolution RGB conversion is only needed for visualization.
-            if config.ENABLE_VISUALIZATION:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # === LED Extraction ===
+            # The first row belongs to the top strip.
+            # Side strips start from the second row.
+            # Extract colors while preserving the RGB image dimensions.
+            left_colors = color_grid[1:, 0:1, :]    # (17, 1, 3)
+            top_colors = color_grid[0:1, :, :]      # (1, 32, 3)
+            right_colors = color_grid[1:, -1:, :]  # (17, 1, 3)
+
+            # Map the extracted colors to the physical LED counts.
+            # INTER_NEAREST duplicates colors without blending.
+            left_leds = cv2.resize(
+                left_colors,
+                (1, config.N_LED_SIDE),
+                interpolation=cv2.INTER_NEAREST,
+            ).reshape(config.N_LED_SIDE, 3)
+
+            top_leds = cv2.resize(
+                top_colors,
+                (config.N_LED_TOP, 1),
+                interpolation=cv2.INTER_NEAREST,
+            ).reshape(config.N_LED_TOP, 3)
+
+            right_leds = cv2.resize(
+                right_colors,
+                (1, config.N_LED_SIDE),
+                interpolation=cv2.INTER_NEAREST,
+            ).reshape(config.N_LED_SIDE, 3)
+
+            # Extracted LED arrays:
+            # left_leds  -> (72, 3)
+            # top_leds   -> (144, 3)
+            # right_leds -> (72, 3)
 
             t2 = time.perf_counter()
 
-            # Visualization.
+            # === Visualization ===
             if config.ENABLE_VISUALIZATION:
+
+                # Convert full-resolution frame only for video preview.
+                rgb = cv2.cvtColor(
+                    frame,
+                    cv2.COLOR_BGR2RGB,
+                )
+
+                # Create U-shaped LED visualization matrix.
+                # 73 rows x 144 columns, with a black interior.
+                led_strip = np.zeros(
+                    (led_preview_height, led_preview_width, 3),
+                    dtype=np.uint8,
+                )
+
+                # Top: all 144 LEDs, including both corners.
+                led_strip[0, :, :] = top_leds
+
+                # Left and right: 72 LEDs each.
+                led_strip[1:, 0, :] = left_leds
+                led_strip[1:, -1, :] = right_leds
+
+                # Update image Artists.
                 video_image.set_data(rgb)
-                color_image.set_data(color_preview)
+                color_image.set_data(color_grid)
+                led_image.set_data(led_strip)
 
                 fig.canvas.draw_idle()
                 fig.canvas.flush_events()
 
             t3 = time.perf_counter()
 
-            # Store measurements in milliseconds.
+            # === Performance Measurements ===
             capture_times.append((t1 - t0) * 1000)
             processing_times.append((t2 - t1) * 1000)
             rendering_times.append((t3 - t2) * 1000)
@@ -146,7 +230,7 @@ def main():
                 processing_ms = sum(processing_times) / len(processing_times)
                 rendering_ms = sum(rendering_times) / len(rendering_times)
 
-                # f"\033[2K\r" - clears terminal line
+                # Clear terminal line and print updated measurements.
                 print(
                     f"\033[2K\r"
                     f"FPS ({len(frame_times) - 1:3d}/100): {fps:6.2f} | "
@@ -159,10 +243,14 @@ def main():
 
     except KeyboardInterrupt:
         pass
+
     finally:
         cap.release()
+
         if fig is not None:
             plt.close(fig)
+
+        print()
 
 
 if __name__ == "__main__":

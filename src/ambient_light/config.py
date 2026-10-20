@@ -4,21 +4,25 @@
 REQUESTED_WIDTH: int = 640
 REQUESTED_HEIGHT: int = 480
 
+# LED layout: 72 left side + 144 top + 72 right side (288 LEDs total).
+N_LED_TOP: int = 144
+N_LED_SIDE: int = 72
+
 # Downsampled image resolution for ambient light color extraction.
 # Screen aspect ratio: 16:9.
-# LED layout: 144 left + 288 top + 144 right (576 LEDs total).
 # 4 LEDs per color group:
-# - 36 vertical zones on each side.
-# - 72 horizontal zones along the top.
+# - 18 vertical zones on each side (72 / 4).
+# - 36 horizontal zones along the top (144 / 4).
+# - 72 independent color zones in total.
 #
-# Recommended resolutions:
-# 32x18   - Fast, lower spatial precision.
-# 64x36   - Recommended: exact 16:9, matches vertical zones.
-# 128x72  - Higher precision, covers all LED zones.
+# Recommended resolutions to keep 16:9 aspect ratio:
+# 32x18   - Fast, lower spatial precision, matches vertical zones.
+# 64x36   - Recommended: balanced detail and performance.
+# 128x72  - Higher precision for more accurate color mapping.
 #
 # LED colors will be mapped proportionally to the image grid.
 # Grid dimensions do not need to match the number of LED groups.
 GRID_WIDTH: int = 32
 GRID_HEIGHT: int = 18
 
-ENABLE_VISUALIZATION: bool = False
+ENABLE_VISUALIZATION: bool = True
