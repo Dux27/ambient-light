@@ -8,6 +8,149 @@ import numpy as np
 from ambient_light import config
 
 
+def createGaussianWeights(
+    grid_width: int,
+    grid_height: int,
+    top_zones: int,
+    side_zones: int,
+) -> np.ndarray:
+    """
+    Precompute normalized Gaussian weights for every LED color zone.
+
+    Zone order:
+        1. Left side: top to bottom
+        2. Top: left to right
+        3. Right side: top to bottom
+
+    Returns:
+        (N_ZONES, GRID_WIDTH * GRID_HEIGHT) float32 array.
+    """
+
+    # Normalized coordinates of pixel centers in the color grid.
+    x = (np.arange(grid_width, dtype=np.float32) + 0.5) / grid_width
+    y = (np.arange(grid_height, dtype=np.float32) + 0.5) / grid_height
+
+    X, Y = np.meshgrid(x, y)
+
+    weights = []
+
+    inward_spread = config.GAUSSIAN_INWARD_SPREAD
+    along_spread = config.GAUSSIAN_ALONG_SPREAD
+
+    # === Left Side ===
+    for i in range(side_zones):
+        center_y = (i + 0.5) / side_zones
+
+        sigma_x = inward_spread
+        sigma_y = along_spread / side_zones
+
+        distance = (
+            (X / sigma_x) ** 2
+            + ((Y - center_y) / sigma_y) ** 2
+        )
+
+        weights.append(np.exp(-0.5 * distance))
+
+    # === Top ===
+    for i in range(top_zones):
+        center_x = (i + 0.5) / top_zones
+
+        sigma_x = along_spread / top_zones
+        sigma_y = inward_spread
+
+        distance = (
+            ((X - center_x) / sigma_x) ** 2
+            + (Y / sigma_y) ** 2
+        )
+
+        weights.append(np.exp(-0.5 * distance))
+
+    # === Right Side ===
+    for i in range(side_zones):
+        center_y = (i + 0.5) / side_zones
+
+        sigma_x = inward_spread
+        sigma_y = along_spread / side_zones
+
+        distance = (
+            ((X - 1.0) / sigma_x) ** 2
+            + ((Y - center_y) / sigma_y) ** 2
+        )
+
+        weights.append(np.exp(-0.5 * distance))
+
+    # Shape: (N_ZONES, GRID_HEIGHT, GRID_WIDTH)
+    weights = np.asarray(weights, dtype=np.float32)
+
+    # Flatten screen dimensions.
+    weights = weights.reshape(len(weights), -1)
+
+    # Normalize each zone's weights so their sum equals 1.
+    weights /= weights.sum(axis=1, keepdims=True)
+
+    return weights
+
+
+def extractLedColors(
+    color_grid: np.ndarray,
+    weights: np.ndarray,
+    top_zones: int,
+    side_zones: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Calculate weighted RGB colors and expand them to physical LEDs.
+
+    Returns:
+        left_leds:  (N_LED_SIDE, 3)
+        top_leds:   (N_LED_TOP, 3)
+        right_leds: (N_LED_SIDE, 3)
+    """
+
+    # Convert RGB image into an array of RGB pixels.
+    # Example: (18, 32, 3) -> (576, 3)
+    pixels = color_grid.reshape(-1, 3).astype(np.float32)
+
+    # Weighted average of every RGB channel for every zone.
+    # Shape: (N_ZONES, 3)
+    zone_colors = weights @ pixels
+
+    zone_colors = np.clip(
+        np.rint(zone_colors), 0, 255
+    ).astype(np.uint8)
+
+    # Split into left, top and right zones.
+    left_colors = zone_colors[:side_zones]
+
+    top_colors = zone_colors[
+        side_zones : side_zones + top_zones
+    ]
+
+    right_colors = zone_colors[
+        side_zones + top_zones :
+    ]
+
+    # Assign each calculated color to four physical LEDs.
+    left_leds = np.repeat(
+        left_colors,
+        config.LEDS_PER_GROUP,
+        axis=0,
+    )
+
+    top_leds = np.repeat(
+        top_colors,
+        config.LEDS_PER_GROUP,
+        axis=0,
+    )
+
+    right_leds = np.repeat(
+        right_colors,
+        config.LEDS_PER_GROUP,
+        axis=0,
+    )
+
+    return left_leds, top_leds, right_leds
+
+
 def main():
     # === Capture Initialization ===
     cap = cv2.VideoCapture("/dev/video0", cv2.CAP_V4L2)
@@ -42,24 +185,48 @@ def main():
             f"-> {width}x{height}"
         )
 
+    # === LED Group Configuration ===
+    if (
+        config.N_LED_TOP % config.LEDS_PER_GROUP != 0
+        or config.N_LED_SIDE % config.LEDS_PER_GROUP != 0
+    ):
+        raise ValueError(
+            "LED counts must be divisible by LEDS_PER_GROUP"
+        )
+
+    top_zones = config.N_LED_TOP // config.LEDS_PER_GROUP
+    side_zones = config.N_LED_SIDE // config.LEDS_PER_GROUP
+
+    total_zones = top_zones + 2 * side_zones
+
+    print(f"LED color zones: {total_zones}")
+    print(f"Top zones: {top_zones}")
+    print(f"Side zones: {side_zones} each")
+
+    # === Precompute Gaussian Weights ===
+    weights = createGaussianWeights(
+        config.GRID_WIDTH,
+        config.GRID_HEIGHT,
+        top_zones,
+        side_zones,
+    )
+
+    print(f"Gaussian weights shape: {weights.shape}")
+
     # === Visualization Initialization ===
     fig = None
-    visualization_fps = 8
-    visualization_interval = 1.0 / visualization_fps
+
+    visualization_interval = 1.0 / config.VISUALIZATION_FPS
     last_visualization_time = 0.0
 
     if config.ENABLE_VISUALIZATION:
         plt.ion()
 
-        # Two rows, six columns:
-        # Top: original video + color grid
-        # Bottom: left strip + top strip + right strip
         fig = plt.figure(figsize=(17, 9))
 
         gs = fig.add_gridspec(
             2, 6,
             height_ratios=[3, 2],
-            width_ratios=[1, 1, 1, 1, 1, 1],
             hspace=0.25,
             wspace=0.15,
         )
@@ -79,7 +246,7 @@ def main():
         )
 
         fig.canvas.manager.set_window_title("HDMI Capture")
-        fig.suptitle("Ambient Light Visualization")
+        fig.suptitle("Ambient Light - Gaussian Color Extraction")
 
         # === Video Axes ===
         video_image = ax_video.imshow(
@@ -137,15 +304,12 @@ def main():
         ax_right.axis("off")
 
         fig.canvas.manager.full_screen_toggle()
-
         plt.show(block=False)
 
     # === Performance Measurements ===
     fail_counter = 0
 
-    # 101 timestamps represent 100 frame intervals.
     frame_times = deque(maxlen=101)
-
     capture_times = deque(maxlen=100)
     processing_times = deque(maxlen=100)
     rendering_times = deque(maxlen=100)
@@ -169,47 +333,27 @@ def main():
                 continue
 
             # === Color Extraction ===
-            # Downsample original BGR frame to the configured grid.
+            # Downsample original BGR image to the color grid.
             color_grid = cv2.resize(
                 frame,
                 (config.GRID_WIDTH, config.GRID_HEIGHT),
                 interpolation=cv2.INTER_AREA,
             )
 
-            # Convert only the downsampled grid to RGB.
             color_grid = cv2.cvtColor(
                 color_grid,
                 cv2.COLOR_BGR2RGB,
             )
 
-            # === LED Extraction ===
-            # The top strip uses the first row.
-            # Side strips start from the second row.
-            left_colors = color_grid[1:, 0:1, :]
-            top_colors = color_grid[0:1, :, :]
-            right_colors = color_grid[1:, -1:, :]
+            # === Gaussian LED Extraction ===
+            left_leds, top_leds, right_leds = extractLedColors(
+                color_grid,
+                weights,
+                top_zones,
+                side_zones,
+            )
 
-            # Expand extracted colors to the physical LED counts.
-            # INTER_NEAREST duplicates source colors without blending.
-            left_leds = cv2.resize(
-                left_colors,
-                (1, config.N_LED_SIDE),
-                interpolation=cv2.INTER_NEAREST,
-            ).reshape(config.N_LED_SIDE, 3)
-
-            top_leds = cv2.resize(
-                top_colors,
-                (config.N_LED_TOP, 1),
-                interpolation=cv2.INTER_NEAREST,
-            ).reshape(config.N_LED_TOP, 3)
-
-            right_leds = cv2.resize(
-                right_colors,
-                (1, config.N_LED_SIDE),
-                interpolation=cv2.INTER_NEAREST,
-            ).reshape(config.N_LED_SIDE, 3)
-
-            # LED arrays always available:
+            # Physical RGB arrays:
             # left_leds  -> (72, 3)
             # top_leds   -> (144, 3)
             # right_leds -> (72, 3)
@@ -221,15 +365,15 @@ def main():
                 now = time.perf_counter()
 
                 if now - last_visualization_time >= visualization_interval:
-                    # Full-resolution RGB is needed only for video preview.
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Full-frame RGB conversion only for preview.
+                    rgb = cv2.cvtColor(
+                        frame,
+                        cv2.COLOR_BGR2RGB,
+                    )
 
-                    # Update original video and color grid.
                     video_image.set_data(rgb)
                     color_image.set_data(color_grid)
 
-                    # Display the physical LED arrays.
-                    # Preserve a single column/row dimension for imshow().
                     left_image.set_data(
                         left_leds.reshape(config.N_LED_SIDE, 1, 3)
                     )
